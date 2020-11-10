@@ -5,7 +5,7 @@ using System.Text;
 
 using Inflectra.SpiraTest.PlugIns;
 using System.Diagnostics;
-using SampleDataSync.SpiraImportExport;
+using SampleDataSync.SpiraSoapService;
 using System.Globalization;
 using System.ServiceModel;
 
@@ -15,7 +15,7 @@ namespace SampleDataSync
     /// Sample data-synchronization provider that synchronizes incidents between SpiraTest/Plan/Team and an external system
     /// </summary>
     /// <remarks>
-    /// Requires Spira v4.0 or newer since it uses the v4.0+ compatible web service API
+    /// Requires Spira v6.0 or newer since it uses the v6.0+ compatible web service API
     /// </remarks>
     public class DataSync : IDataSyncPlugIn
     {
@@ -146,7 +146,7 @@ namespace SampleDataSync
 
                 //Instantiate the SpiraTest web-service proxy class
                 Uri spiraUri = new Uri(this.webServiceBaseUrl + Constants.WEB_SERVICE_URL_SUFFIX);
-                SpiraImportExport.ImportExportClient spiraImportExport = SpiraClientFactory.CreateClient(spiraUri);
+                SpiraSoapService.SoapServiceClient spiraSoapService = SpiraClientFactory.CreateClient(spiraUri);
 
                 /*
                  * TODO: Add the code to connect and authenticate to the external system
@@ -157,18 +157,18 @@ namespace SampleDataSync
                  */
 
                 //Now lets get the product name we should be referring to
-                string productName = spiraImportExport.System_GetProductName();
+                string productName = spiraSoapService.System_GetProductName();
 
                 //**** Next lets load in the project and user mappings ****
-                bool success = spiraImportExport.Connection_Authenticate2(internalLogin, internalPassword, DATA_SYNC_NAME);
-                if (!success)
+                RemoteCredentials credentials = spiraSoapService.Connection_Authenticate1(internalLogin, internalPassword, DATA_SYNC_NAME);
+                if (credentials == null)
                 {
                     //We can't authenticate so end
                     LogErrorEvent("Unable to authenticate with " + productName + " API, stopping data-synchronization", EventLogEntryType.Error);
                     return ServiceReturnType.Error;
                 }
-                RemoteDataMapping[] projectMappings = spiraImportExport.DataMapping_RetrieveProjectMappings(dataSyncSystemId);
-                RemoteDataMapping[] userMappings = spiraImportExport.DataMapping_RetrieveUserMappings(dataSyncSystemId);
+                RemoteDataMapping[] projectMappings = spiraSoapService.DataMapping_RetrieveProjectMappings(credentials,dataSyncSystemId);
+                RemoteDataMapping[] userMappings = spiraSoapService.DataMapping_RetrieveUserMappings(credentials, dataSyncSystemId);
 
                 //Loop for each of the projects in the project mapping
                 foreach (RemoteDataMapping projectMapping in projectMappings)
@@ -178,23 +178,26 @@ namespace SampleDataSync
                     string externalProjectId = projectMapping.ExternalKey;
 
                     //Connect to the SpiraTest project
-                    success = spiraImportExport.Connection_ConnectToProject(projectId);
-                    if (!success)
+                    RemoteProject remoteProject = spiraSoapService.Project_RetrieveById(credentials, projectId);
+                    if (remoteProject == null)
                     {
                         //We can't connect so go to next project
                         LogErrorEvent(String.Format("Unable to connect to {0} project PR{1}, please check that the {0} login has the appropriate permissions", productName, projectId), EventLogEntryType.Error);
                         continue;
                     }
 
+                    //Get the template of the project
+                    int projectTemplateId = remoteProject.ProjectTemplateId.Value;
+
                     //Get the list of project-specific mappings from the data-mapping repository
                     //We need to get severity, priority, status and type mappings
-                    RemoteDataMapping[] severityMappings = spiraImportExport.DataMapping_RetrieveFieldValueMappings(dataSyncSystemId, (int)Constants.ArtifactField.Severity);
-                    RemoteDataMapping[] priorityMappings = spiraImportExport.DataMapping_RetrieveFieldValueMappings(dataSyncSystemId, (int)Constants.ArtifactField.Priority);
-                    RemoteDataMapping[] statusMappings = spiraImportExport.DataMapping_RetrieveFieldValueMappings(dataSyncSystemId, (int)Constants.ArtifactField.Status);
-                    RemoteDataMapping[] typeMappings = spiraImportExport.DataMapping_RetrieveFieldValueMappings(dataSyncSystemId, (int)Constants.ArtifactField.Type);
+                    RemoteDataMapping[] severityMappings = spiraSoapService.DataMapping_RetrieveFieldValueMappings(credentials, projectId, dataSyncSystemId, (int)Constants.ArtifactField.Severity);
+                    RemoteDataMapping[] priorityMappings = spiraSoapService.DataMapping_RetrieveFieldValueMappings(credentials, projectId, dataSyncSystemId, (int)Constants.ArtifactField.Priority);
+                    RemoteDataMapping[] statusMappings = spiraSoapService.DataMapping_RetrieveFieldValueMappings(credentials, projectId, dataSyncSystemId, (int)Constants.ArtifactField.Status);
+                    RemoteDataMapping[] typeMappings = spiraSoapService.DataMapping_RetrieveFieldValueMappings(credentials, projectId, dataSyncSystemId, (int)Constants.ArtifactField.Type);
 
                     //Get the list of custom properties configured for this project and the corresponding data mappings
-                    RemoteCustomProperty[] incidentCustomProperties = spiraImportExport.CustomProperty_RetrieveForArtifactType((int)Constants.ArtifactType.Incident, false);
+                    RemoteCustomProperty[] incidentCustomProperties = spiraSoapService.CustomProperty_RetrieveForArtifactType(credentials, projectTemplateId, (int)Constants.ArtifactType.Incident, false);
                     Dictionary<int, RemoteDataMapping> customPropertyMappingList = new Dictionary<int, RemoteDataMapping>();
                     Dictionary<int, RemoteDataMapping[]> customPropertyValueMappingList = new Dictionary<int, RemoteDataMapping[]>();
                     foreach (RemoteCustomProperty customProperty in incidentCustomProperties)
@@ -202,21 +205,21 @@ namespace SampleDataSync
                         //Get the mapping for this custom property
                         if (customProperty.CustomPropertyId.HasValue)
                         {
-                            RemoteDataMapping customPropertyMapping = spiraImportExport.DataMapping_RetrieveCustomPropertyMapping(dataSyncSystemId, (int)Constants.ArtifactType.Incident, customProperty.CustomPropertyId.Value);
+                            RemoteDataMapping customPropertyMapping = spiraSoapService.DataMapping_RetrieveCustomPropertyMapping(credentials, projectId, dataSyncSystemId, (int)Constants.ArtifactType.Incident, customProperty.CustomPropertyId.Value);
                             customPropertyMappingList.Add(customProperty.CustomPropertyId.Value, customPropertyMapping);
 
                             //For list types need to also get the property value mappings
                             if (customProperty.CustomPropertyTypeId == (int)Constants.CustomPropertyType.List || customProperty.CustomPropertyTypeId == (int)Constants.CustomPropertyType.MultiList)
                             {
-                                RemoteDataMapping[] customPropertyValueMappings = spiraImportExport.DataMapping_RetrieveCustomPropertyValueMappings(dataSyncSystemId, (int)Constants.ArtifactType.Incident, customProperty.CustomPropertyId.Value);
+                                RemoteDataMapping[] customPropertyValueMappings = spiraSoapService.DataMapping_RetrieveCustomPropertyValueMappings(credentials, projectId, dataSyncSystemId, (int)Constants.ArtifactType.Incident, customProperty.CustomPropertyId.Value);
                                 customPropertyValueMappingList.Add(customProperty.CustomPropertyId.Value, customPropertyValueMappings);
                             }
                         }
                     }
 
                     //Now get the list of releases and incidents that have already been mapped
-                    RemoteDataMapping[] incidentMappings = spiraImportExport.DataMapping_RetrieveArtifactMappings(dataSyncSystemId, (int)Constants.ArtifactType.Incident);
-                    RemoteDataMapping[] releaseMappings = spiraImportExport.DataMapping_RetrieveArtifactMappings(dataSyncSystemId, (int)Constants.ArtifactType.Release);
+                    RemoteDataMapping[] incidentMappings = spiraSoapService.DataMapping_RetrieveArtifactMappings(credentials, projectId, dataSyncSystemId, (int)Constants.ArtifactType.Incident);
+                    RemoteDataMapping[] releaseMappings = spiraSoapService.DataMapping_RetrieveArtifactMappings(credentials, projectId, dataSyncSystemId, (int)Constants.ArtifactType.Release);
 
                     /*
                      * TODO: Next add the code to connect to the project in the external system if necessary
@@ -236,10 +239,10 @@ namespace SampleDataSync
 
                     //Get the incidents in batches of 100
                     List<RemoteIncident> incidentList = new List<RemoteIncident>();
-                    long incidentCount = spiraImportExport.Incident_Count(null);
+                    long incidentCount = spiraSoapService.Incident_Count(credentials, projectId, null);
                     for (int startRow = 1; startRow <= incidentCount; startRow += Constants.INCIDENT_PAGE_SIZE)
                     {
-                        RemoteIncident[] incidentBatch = spiraImportExport.Incident_RetrieveNew(lastSyncDate.Value, startRow, Constants.INCIDENT_PAGE_SIZE);
+                        RemoteIncident[] incidentBatch = spiraSoapService.Incident_RetrieveNew(credentials, projectId, lastSyncDate.Value, startRow, Constants.INCIDENT_PAGE_SIZE);
                         incidentList.AddRange(incidentBatch);
                     }
                     LogTraceEvent(eventLog, "Found " + incidentList.Count + " new incidents in " + productName, EventLogEntryType.Information);
@@ -255,7 +258,7 @@ namespace SampleDataSync
                     {
                         try
                         {
-                            ProcessIncident(projectId, spiraImportExport, remoteIncident, newIncidentMappings, newReleaseMappings, oldReleaseMappings, customPropertyMappingList, customPropertyValueMappingList, incidentCustomProperties, incidentMappings, externalProjectId, productName, severityMappings, priorityMappings, statusMappings, typeMappings, userMappings, releaseMappings);
+                            ProcessIncident(credentials, projectId, spiraSoapService, remoteIncident, newIncidentMappings, newReleaseMappings, oldReleaseMappings, customPropertyMappingList, customPropertyValueMappingList, incidentCustomProperties, incidentMappings, externalProjectId, productName, severityMappings, priorityMappings, statusMappings, typeMappings, userMappings, releaseMappings);
                         }
                         catch (Exception exception)
                         {
@@ -267,28 +270,12 @@ namespace SampleDataSync
                     //Finally we need to update the mapping data on the server before starting the second phase
                     //of the data-synchronization
                     //At this point we have potentially added incidents, added releases and removed releases
-                    spiraImportExport.DataMapping_AddArtifactMappings(dataSyncSystemId, (int)Constants.ArtifactType.Incident, newIncidentMappings.ToArray());
-                    spiraImportExport.DataMapping_AddArtifactMappings(dataSyncSystemId, (int)Constants.ArtifactType.Release, newReleaseMappings.ToArray());
-                    spiraImportExport.DataMapping_RemoveArtifactMappings(dataSyncSystemId, (int)Constants.ArtifactType.Release, oldReleaseMappings.ToArray());
-
-                    //Re-authenticate with Spira and reconnect to the project to avoid potential timeout issues
-                    success = spiraImportExport.Connection_Authenticate2(internalLogin, internalPassword, DATA_SYNC_NAME);
-                    if (!success)
-                    {
-                        //We can't authenticate so end
-                        LogErrorEvent("Unable to authenticate with " + productName + " API, stopping data-synchronization", EventLogEntryType.Error);
-                        return ServiceReturnType.Error;
-                    }
-                    success = spiraImportExport.Connection_ConnectToProject(projectId);
-                    if (!success)
-                    {
-                        //We can't connect so go to next project
-                        LogErrorEvent("Unable to connect to " + productName + " project PR" + projectId + ", please check that the " + productName + " login has the appropriate permissions", EventLogEntryType.Error);
-                        return ServiceReturnType.Error;
-                    }
+                    spiraSoapService.DataMapping_AddArtifactMappings(credentials, projectId, dataSyncSystemId, (int)Constants.ArtifactType.Incident, newIncidentMappings.ToArray());
+                    spiraSoapService.DataMapping_AddArtifactMappings(credentials, projectId, dataSyncSystemId, (int)Constants.ArtifactType.Release, newReleaseMappings.ToArray());
+                    spiraSoapService.DataMapping_RemoveArtifactMappings(credentials, projectId, dataSyncSystemId, (int)Constants.ArtifactType.Release, oldReleaseMappings.ToArray());
 
                     //**** Next we need to see if any of the previously mapped incidents has changed or any new items added to the external system ****
-                    incidentMappings = spiraImportExport.DataMapping_RetrieveArtifactMappings(dataSyncSystemId, (int)Constants.ArtifactType.Incident);
+                    incidentMappings = spiraSoapService.DataMapping_RetrieveArtifactMappings(credentials, projectId, dataSyncSystemId, (int)Constants.ArtifactType.Incident);
 
                     //Need to create a list to hold any new releases and new incidents
                     newIncidentMappings = new List<RemoteDataMapping>();
@@ -313,7 +300,7 @@ namespace SampleDataSync
                         try
                         {
                             //Extract the data from the external bug object and load into Spira as a new incident
-                            ProcessExternalBug(projectId, spiraImportExport, externalSystemBug, newIncidentMappings, newReleaseMappings, oldReleaseMappings, customPropertyMappingList, customPropertyValueMappingList, incidentCustomProperties, incidentMappings, externalProjectId, productName, severityMappings, priorityMappings, statusMappings, typeMappings, userMappings, releaseMappings);
+                            ProcessExternalBug(credentials, projectId, spiraSoapService, externalSystemBug, newIncidentMappings, newReleaseMappings, oldReleaseMappings, customPropertyMappingList, customPropertyValueMappingList, incidentCustomProperties, incidentMappings, externalProjectId, productName, severityMappings, priorityMappings, statusMappings, typeMappings, userMappings, releaseMappings);
                         }
                         catch (Exception exception)
                         {
@@ -324,15 +311,15 @@ namespace SampleDataSync
 
                     //Finally we need to update the mapping data on the server
                     //At this point we have potentially added releases and incidents
-                    spiraImportExport.DataMapping_AddArtifactMappings(dataSyncSystemId, (int)Constants.ArtifactType.Release, newReleaseMappings.ToArray());
-                    spiraImportExport.DataMapping_AddArtifactMappings(dataSyncSystemId, (int)Constants.ArtifactType.Incident, newIncidentMappings.ToArray());
+                    spiraSoapService.DataMapping_AddArtifactMappings(credentials, projectId, dataSyncSystemId, (int)Constants.ArtifactType.Release, newReleaseMappings.ToArray());
+                    spiraSoapService.DataMapping_AddArtifactMappings(credentials, projectId, dataSyncSystemId, (int)Constants.ArtifactType.Incident, newIncidentMappings.ToArray());
                 }
 
                 //The following code is only needed during debugging
                 LogTraceEvent(eventLog, "Import Completed", EventLogEntryType.Warning);
 
                 //Mark objects ready for garbage collection
-                spiraImportExport = null;
+                spiraSoapService = null;
                 
                 /*
                  * TODO: Set to null any objects releated to the external system, call Dispose() if they implement IDisposable
@@ -353,7 +340,7 @@ namespace SampleDataSync
         /// Processes a single SpiraTest incident record and adds to the external system
         /// </summary>
         /// <param name="projectId">The id of the current project</param>
-        /// <param name="spiraImportExport">The Spira API proxy class</param>
+        /// <param name="spiraSoapService">The Spira API proxy class</param>
         /// <param name="remoteIncident">The Spira incident</param>
         /// <param name="newIncidentMappings">The list of any new incidents to be mapped</param>
         /// <param name="newReleaseMappings">The list of any new releases to be mapped</param>
@@ -370,7 +357,8 @@ namespace SampleDataSync
         /// <param name="typeMappings">The incident type mappings</param>
         /// <param name="userMappings">The incident user mappings</param>
         /// <param name="releaseMappings">The release mappings</param>
-        private void ProcessIncident(int projectId, ImportExportClient spiraImportExport, RemoteIncident remoteIncident, List<RemoteDataMapping> newIncidentMappings, List<RemoteDataMapping> newReleaseMappings, List<RemoteDataMapping> oldReleaseMappings, Dictionary<int, RemoteDataMapping> customPropertyMappingList, Dictionary<int, RemoteDataMapping[]> customPropertyValueMappingList, RemoteCustomProperty[] incidentCustomProperties, RemoteDataMapping[] incidentMappings, string externalProjectId, string productName, RemoteDataMapping[] severityMappings, RemoteDataMapping[] priorityMappings, RemoteDataMapping[] statusMappings, RemoteDataMapping[] typeMappings, RemoteDataMapping[] userMappings, RemoteDataMapping[] releaseMappings)
+        /// <param name="credentials">The Spira credentials</param>
+        private void ProcessIncident(RemoteCredentials credentials, int projectId, SoapServiceClient spiraSoapService, RemoteIncident remoteIncident, List<RemoteDataMapping> newIncidentMappings, List<RemoteDataMapping> newReleaseMappings, List<RemoteDataMapping> oldReleaseMappings, Dictionary<int, RemoteDataMapping> customPropertyMappingList, Dictionary<int, RemoteDataMapping[]> customPropertyValueMappingList, RemoteCustomProperty[] incidentCustomProperties, RemoteDataMapping[] incidentMappings, string externalProjectId, string productName, RemoteDataMapping[] severityMappings, RemoteDataMapping[] priorityMappings, RemoteDataMapping[] statusMappings, RemoteDataMapping[] typeMappings, RemoteDataMapping[] userMappings, RemoteDataMapping[] releaseMappings)
         {
             //Get certain incident fields into local variables (if used more than once)
             int incidentId = remoteIncident.IncidentId.Value;
@@ -380,8 +368,8 @@ namespace SampleDataSync
             if (InternalFunctions.FindMappingByInternalId(projectId, incidentId, incidentMappings) == null)
             {
                 //Get the URL for the incident in Spira, we'll use it later
-                string baseUrl = spiraImportExport.System_GetWebServerUrl();
-                string incidentUrl = spiraImportExport.System_GetArtifactUrl((int)Constants.ArtifactType.Incident, projectId, incidentId, "").Replace("~", baseUrl);
+                string baseUrl = spiraSoapService.System_GetWebServerUrl();
+                string incidentUrl = spiraSoapService.System_GetArtifactUrl((int)Constants.ArtifactType.Incident, projectId, incidentId, "").Replace("~", baseUrl);
 
                 //Get the name/description of the incident. The description will be available in both rich (HTML) and plain-text
                 //depending on what the external system can handle
@@ -393,13 +381,13 @@ namespace SampleDataSync
                 RemoteSort associationSort = new RemoteSort();
                 associationSort.SortAscending = true;
                 associationSort.PropertyName = "CreationDate";
-                RemoteAssociation[] remoteAssociations = spiraImportExport.Association_RetrieveForArtifact((int)Constants.ArtifactType.Incident, incidentId, null, associationSort);
+                RemoteAssociation[] remoteAssociations = spiraSoapService.Association_RetrieveForArtifact(credentials, projectId, (int)Constants.ArtifactType.Incident, incidentId, null, associationSort);
 
                 //See if this incident has any attachments
                 RemoteSort attachmentSort = new RemoteSort();
                 attachmentSort.SortAscending = true;
                 attachmentSort.PropertyName = "AttachmentId";
-                RemoteDocument[] remoteDocuments = spiraImportExport.Document_RetrieveForArtifact((int)Constants.ArtifactType.Incident, incidentId, null, attachmentSort);
+                RemoteDocument[] remoteDocuments = spiraSoapService.Document_RetrieveForArtifact(credentials, projectId, (int)Constants.ArtifactType.Incident, incidentId, null, attachmentSort);
 
                 //Get some of the incident's non-mappable fields
                 DateTime creationDate = remoteIncident.CreationDate.Value;
@@ -466,7 +454,7 @@ namespace SampleDataSync
 
                 //Now get the external system's ID for the Opener/Detector of the incident (reporter)
                 string externalReporter = "";
-                dataMapping = FindUserMappingByInternalId(remoteIncident.OpenerId.Value, userMappings, spiraImportExport);
+                dataMapping = FindUserMappingByInternalId(credentials, remoteIncident.OpenerId.Value, userMappings, spiraSoapService);
                 //If we can't find the user, just log a warning
                 if (dataMapping == null)
                 {
@@ -481,7 +469,7 @@ namespace SampleDataSync
                 string externalAssignee = "";
                 if (remoteIncident.OwnerId.HasValue)
                 {
-                    dataMapping = FindUserMappingByInternalId(remoteIncident.OwnerId.Value, userMappings, spiraImportExport);
+                    dataMapping = FindUserMappingByInternalId(credentials, remoteIncident.OwnerId.Value, userMappings, spiraSoapService);
                     //If we can't find the user, just log a warning
                     if (dataMapping == null)
                     {
@@ -506,7 +494,7 @@ namespace SampleDataSync
                         LogTraceEvent(eventLog, "Adding new release in " + EXTERNAL_SYSTEM_NAME + " for release " + detectedReleaseId + "\n", EventLogEntryType.Information);
 
                         //Get the Spira release
-                        RemoteRelease remoteRelease = spiraImportExport.Release_RetrieveById(detectedReleaseId);
+                        RemoteRelease remoteRelease = spiraSoapService.Release_RetrieveById(credentials, projectId, detectedReleaseId);
                         if (remoteRelease != null)
                         {
                             /*
@@ -569,7 +557,7 @@ namespace SampleDataSync
                         LogTraceEvent(eventLog, "Adding new release in " + EXTERNAL_SYSTEM_NAME + " for release " + resolvedReleaseId + "\n", EventLogEntryType.Information);
 
                         //Get the Spira release
-                        RemoteRelease remoteRelease = spiraImportExport.Release_RetrieveById(resolvedReleaseId);
+                        RemoteRelease remoteRelease = spiraSoapService.Release_RetrieveById(credentials, projectId, resolvedReleaseId);
                         if (remoteRelease != null)
                         {
                             /*
@@ -626,7 +614,7 @@ namespace SampleDataSync
                 //Now we need to see if any of the custom properties have changed
                 if (remoteIncident.CustomProperties != null && remoteIncident.CustomProperties.Length > 0)
                 {
-                    ProcessCustomProperties(productName, projectId, remoteIncident, externalSystemCustomFieldValues, customPropertyMappingList, customPropertyValueMappingList, userMappings, spiraImportExport);
+                    ProcessCustomProperties(credentials, productName, projectId, remoteIncident, externalSystemCustomFieldValues, customPropertyMappingList, customPropertyValueMappingList, userMappings, spiraSoapService);
                 }
                 LogTraceEvent(eventLog, "Captured incident custom values\n", EventLogEntryType.Information);
 
@@ -674,16 +662,18 @@ namespace SampleDataSync
                 if (!String.IsNullOrEmpty(EXTERNAL_BUG_URL))
                 {
                     string externalUrl = String.Format(EXTERNAL_BUG_URL, externalBugId);
+                    List<RemoteLinkedArtifact> linkedArtifacts = new List<RemoteLinkedArtifact>();
+                    linkedArtifacts.Add(new RemoteLinkedArtifact() { ArtifactId = incidentId, ArtifactTypeId = (int)Constants.ArtifactType.Incident });
                     RemoteDocument remoteUrl = new RemoteDocument();
-                    remoteUrl.ArtifactId = incidentId;
-                    remoteUrl.ArtifactTypeId = (int)Constants.ArtifactType.Incident;
+                    remoteUrl.ProjectId = projectId;
+                    remoteUrl.AttachedArtifacts = linkedArtifacts.ToArray();
                     remoteUrl.Description = "Link to issue in " + EXTERNAL_SYSTEM_NAME;
                     remoteUrl.FilenameOrUrl = externalUrl;
-                    spiraImportExport.Document_AddUrl(remoteUrl);
+                    spiraSoapService.Document_AddUrl(credentials, remoteUrl);
                 }
 
                 //See if we have any comments to add to the external system
-                RemoteComment[] incidentComments = spiraImportExport.Incident_RetrieveComments(incidentId);
+                RemoteComment[] incidentComments = spiraSoapService.Incident_RetrieveComments(credentials, projectId, incidentId);
                 if (incidentComments != null)
                 {
                     foreach (RemoteComment incidentComment in incidentComments)
@@ -724,7 +714,7 @@ namespace SampleDataSync
                             try
                             {
                                 //Get the binary data for the attachment
-                                byte[] binaryData = spiraImportExport.Document_OpenFile(remoteDocument.AttachmentId.Value);
+                                byte[] binaryData = spiraSoapService.Document_OpenFile(credentials, projectId, remoteDocument.AttachmentId.Value);
                                 if (binaryData != null && binaryData.Length > 0)
                                 {
                                     //TODO: Add the code to add this attachment to the external system
@@ -779,7 +769,7 @@ namespace SampleDataSync
         /// Processes a single external bug record and either adds or updates it in SpiraTest
         /// </summary>
         /// <param name="projectId">The id of the current project</param>
-        /// <param name="spiraImportExport">The Spira API proxy class</param>
+        /// <param name="spiraSoapService">The Spira API proxy class</param>
         /// <param name="externalSystemBug">The external bug object</param>
         /// <param name="newIncidentMappings">The list of any new incidents to be mapped</param>
         /// <param name="newReleaseMappings">The list of any new releases to be mapped</param>
@@ -796,7 +786,8 @@ namespace SampleDataSync
         /// <param name="typeMappings">The incident type mappings</param>
         /// <param name="userMappings">The incident user mappings</param>
         /// <param name="releaseMappings">The release mappings</param>
-        private void ProcessExternalBug(int projectId, ImportExportClient spiraImportExport, object externalSystemBug, List<RemoteDataMapping> newIncidentMappings, List<RemoteDataMapping> newReleaseMappings, List<RemoteDataMapping> oldReleaseMappings, Dictionary<int, RemoteDataMapping> customPropertyMappingList, Dictionary<int, RemoteDataMapping[]> customPropertyValueMappingList, RemoteCustomProperty[] incidentCustomProperties, RemoteDataMapping[] incidentMappings, string externalProjectId, string productName, RemoteDataMapping[] severityMappings, RemoteDataMapping[] priorityMappings, RemoteDataMapping[] statusMappings, RemoteDataMapping[] typeMappings, RemoteDataMapping[] userMappings, RemoteDataMapping[] releaseMappings)
+        /// <param name="credentials">The Spira credentials</param>
+        private void ProcessExternalBug(RemoteCredentials credentials, int projectId, SoapServiceClient spiraSoapService, object externalSystemBug, List<RemoteDataMapping> newIncidentMappings, List<RemoteDataMapping> newReleaseMappings, List<RemoteDataMapping> oldReleaseMappings, Dictionary<int, RemoteDataMapping> customPropertyMappingList, Dictionary<int, RemoteDataMapping[]> customPropertyValueMappingList, RemoteCustomProperty[] incidentCustomProperties, RemoteDataMapping[] incidentMappings, string externalProjectId, string productName, RemoteDataMapping[] severityMappings, RemoteDataMapping[] priorityMappings, RemoteDataMapping[] statusMappings, RemoteDataMapping[] typeMappings, RemoteDataMapping[] userMappings, RemoteDataMapping[] releaseMappings)
         {
             /*
              * TODO: Need to add the code that actually gets the data from the external bug object
@@ -857,7 +848,7 @@ namespace SampleDataSync
                     //Set the dectector for new incidents
                     if (!String.IsNullOrEmpty(externalBugCreator))
                     {
-                        RemoteDataMapping dataMapping = FindUserMappingByExternalKey(externalBugCreator, userMappings, spiraImportExport);
+                        RemoteDataMapping dataMapping = FindUserMappingByExternalKey(credentials, externalBugCreator, userMappings, spiraSoapService);
                         if (dataMapping == null)
                         {
                             //We can't find the matching user so log and ignore
@@ -878,7 +869,7 @@ namespace SampleDataSync
                     //Now retrieve the SpiraTest incident using the Import APIs
                     try
                     {
-                        remoteIncident = spiraImportExport.Incident_RetrieveById(incidentId);
+                        remoteIncident = spiraSoapService.Incident_RetrieveById(credentials, projectId, incidentId);
 
 
                         //Update the name for existing incidents
@@ -987,7 +978,7 @@ namespace SampleDataSync
                         LogTraceEvent(eventLog, "Got the type\n", EventLogEntryType.Information);
 
                         //Now update the bug's owner/assignee in SpiraTest
-                        dataMapping = FindUserMappingByExternalKey(externalBugAssignee, userMappings, spiraImportExport);
+                        dataMapping = FindUserMappingByExternalKey(credentials, externalBugAssignee, userMappings, spiraSoapService);
                         if (dataMapping == null)
                         {
                             //We can't find the matching user so log and ignore
@@ -1038,7 +1029,7 @@ namespace SampleDataSync
                         RemoteComment[] incidentComments = null;
                         if (incidentId != -1)
                         {
-                            incidentComments = spiraImportExport.Incident_RetrieveComments(incidentId);
+                            incidentComments = spiraSoapService.Incident_RetrieveComments(credentials, projectId, incidentId);
                         }
 
                         //Iterate through all the comments and see if we need to add any to SpiraTest
@@ -1140,7 +1131,8 @@ namespace SampleDataSync
                                 remoteRelease.CreationDate = DateTime.UtcNow;
                                 remoteRelease.ResourceCount = 1;
                                 remoteRelease.DaysNonWorking = 0;
-                                remoteRelease = spiraImportExport.Release_Create(remoteRelease, null);
+                                remoteRelease.ProjectId = projectId;
+                                remoteRelease = spiraSoapService.Release_Create(credentials, remoteRelease, null);
 
                                 //Add a new mapping entry
                                 RemoteDataMapping newReleaseMapping = new RemoteDataMapping();
@@ -1201,7 +1193,8 @@ namespace SampleDataSync
                                 remoteRelease.CreationDate = DateTime.UtcNow;
                                 remoteRelease.ResourceCount = 1;
                                 remoteRelease.DaysNonWorking = 0;
-                                remoteRelease = spiraImportExport.Release_Create(remoteRelease, null);
+                                remoteRelease.ProjectId = projectId;
+                                remoteRelease = spiraSoapService.Release_Create(credentials, remoteRelease, null);
 
                                 //Add a new mapping entry
                                 RemoteDataMapping newReleaseMapping = new RemoteDataMapping();
@@ -1229,7 +1222,7 @@ namespace SampleDataSync
                         //Now we need to see if any of the custom fields have changed in the external system bug
                         if (remoteIncident.CustomProperties != null && remoteIncident.CustomProperties.Length > 0)
                         {
-                            ProcessExternalSystemCustomFields(productName, projectId, remoteIncident, externalSystemCustomFieldValues, incidentCustomProperties, customPropertyMappingList, customPropertyValueMappingList, userMappings, spiraImportExport);
+                            ProcessExternalSystemCustomFields(credentials, productName, projectId, remoteIncident, externalSystemCustomFieldValues, incidentCustomProperties, customPropertyMappingList, customPropertyValueMappingList, userMappings, spiraSoapService);
                         }
 
                         //Finally add or update the incident in SpiraTest
@@ -1238,7 +1231,7 @@ namespace SampleDataSync
                             //Debug logging - comment out for production code
                             try
                             {
-                                remoteIncident = spiraImportExport.Incident_Create(remoteIncident);
+                                remoteIncident = spiraSoapService.Incident_Create(credentials, remoteIncident);
                             }
                             catch (Exception exception)
                             {
@@ -1259,7 +1252,7 @@ namespace SampleDataSync
                             {
                                 newIncidentComment.ArtifactId = remoteIncident.IncidentId.Value;
                             }
-                            spiraImportExport.Incident_AddComments(newIncidentComments.ToArray());
+                            spiraSoapService.Incident_AddComments(credentials, projectId, newIncidentComments.ToArray());
 
                             /*
                             * TODO: Need to add the base URL onto the URL that we use to link the Spira incident to the external system
@@ -1269,12 +1262,14 @@ namespace SampleDataSync
                                 try
                                 {
                                     string externalUrl = String.Format(EXTERNAL_BUG_URL, externalBugId);
+                                    List<RemoteLinkedArtifact> linkedArtifacts = new List<RemoteLinkedArtifact>();
+                                    linkedArtifacts.Add(new RemoteLinkedArtifact() { ArtifactId = remoteIncident.IncidentId.Value, ArtifactTypeId = (int)Constants.ArtifactType.Incident });
                                     RemoteDocument remoteUrl = new RemoteDocument();
-                                    remoteUrl.ArtifactId = remoteIncident.IncidentId.Value;
-                                    remoteUrl.ArtifactTypeId = (int)Constants.ArtifactType.Incident;
+                                    remoteUrl.AttachedArtifacts = linkedArtifacts.ToArray();
                                     remoteUrl.Description = "Link to issue in " + EXTERNAL_SYSTEM_NAME;
                                     remoteUrl.FilenameOrUrl = externalUrl;
-                                    spiraImportExport.Document_AddUrl(remoteUrl);
+                                    remoteUrl.ProjectId = projectId;
+                                    spiraSoapService.Document_AddUrl(credentials, remoteUrl);
                                 }
                                 catch (Exception exception)
                                 {
@@ -1294,7 +1289,7 @@ namespace SampleDataSync
                             //remoteDocument.ArtifactTypeId = (int)Constants.ArtifactType.Incident;
                             //remoteDocument.Description = "Any comments";
                             //remoteDocument.UploadDate = DateTime.UtcNow;
-                            //spiraImportExport.Document_AddFile(remoteDocument, binaryData);
+                            //spiraSoapService.Document_AddFile(remoteDocument, binaryData);
 
                             /*
                              * TODO: Add code based on the following that adds URL hyperlinks to the new SpiraTest incident
@@ -1305,7 +1300,7 @@ namespace SampleDataSync
                             //remoteDocument.ArtifactTypeId = (int)Constants.ArtifactType.Incident;
                             //remoteDocument.Description = "Any comments";
                             //remoteDocument.UploadDate = DateTime.UtcNow;
-                            //spiraImportExport.Document_AddUrl(remoteDocument, binaryData);
+                            //spiraSoapService.Document_AddUrl(remoteDocument, binaryData);
 
                             /*
                              * TODO: Add code based on the following that adds incident-to-incident associations to the new SpiraTest incident
@@ -1323,15 +1318,15 @@ namespace SampleDataSync
                             //    remoteAssociation.Comment = "Any comments";
                             //    remoteAssociation.SourceArtifactId = remoteIncident.IncidentId.Value;
                             //    remoteAssociation.SourceArtifactTypeId = (int)Constants.ArtifactType.Incident;
-                            //    spiraImportExport.Association_Create(remoteAssociation);
+                            //    spiraSoapService.Association_Create(remoteAssociation);
                             //}
                         }
                         else
                         {
-                            spiraImportExport.Incident_Update(remoteIncident);
+                            spiraSoapService.Incident_Update(credentials, remoteIncident);
 
                             //Now add any resolutions
-                            spiraImportExport.Incident_AddComments(newIncidentComments.ToArray());
+                            spiraSoapService.Incident_AddComments(credentials, projectId, newIncidentComments.ToArray());
 
                             //Debug logging - comment out for production code
                             LogTraceEvent(eventLog, "Successfully updated\n", EventLogEntryType.Information);
@@ -1363,14 +1358,16 @@ namespace SampleDataSync
         /// Updates the Spira incident object's custom properties with any new/changed custom fields from the external bug object
         /// </summary>
         /// <param name="projectId">The id of the current project</param>
-        /// <param name="spiraImportExport">The Spira API proxy class</param>
+        /// <param name="spiraSoapService">The Spira API proxy class</param>
         /// <param name="remoteArtifact">The Spira artifact</param>
         /// <param name="customPropertyMappingList">The mapping of custom properties</param>
         /// <param name="customPropertyValueMappingList">The mapping of custom property list values</param>
         /// <param name="externalSystemCustomFieldValues">The list of custom fields in the external system</param>
         /// <param name="productName">The name of the product being connected to (SpiraTest, SpiraPlan, etc.)</param>
         /// <param name="userMappings">The user mappings</param>
-        private void ProcessExternalSystemCustomFields(string productName, int projectId, RemoteArtifact remoteArtifact, Dictionary<string, object> externalSystemCustomFieldValues, RemoteCustomProperty[] customProperties, Dictionary<int, RemoteDataMapping> customPropertyMappingList, Dictionary<int, RemoteDataMapping[]> customPropertyValueMappingList, RemoteDataMapping[] userMappings, ImportExportClient spiraImportExport)
+        /// <param name="credentials">The Spira credentials</param>
+        /// <param name="customProperties">The list of defined custom properties</param>
+        private void ProcessExternalSystemCustomFields(RemoteCredentials credentials, string productName, int projectId, RemoteArtifact remoteArtifact, Dictionary<string, object> externalSystemCustomFieldValues, RemoteCustomProperty[] customProperties, Dictionary<int, RemoteDataMapping> customPropertyMappingList, Dictionary<int, RemoteDataMapping[]> customPropertyValueMappingList, RemoteDataMapping[] userMappings, SoapServiceClient spiraSoapService)
         {
             //Loop through all the defined Spira custom properties
             foreach (RemoteCustomProperty customProperty in customProperties)
@@ -1427,7 +1424,7 @@ namespace SampleDataSync
                                 {
                                     //Need to get the Spira custom property value
                                     string fieldValue = externalSystemCustomFieldValues[externalKey].ToString();
-                                    RemoteDataMapping customPropertyValueMapping = FindUserMappingByExternalKey(fieldValue, userMappings, spiraImportExport);
+                                    RemoteDataMapping customPropertyValueMapping = FindUserMappingByExternalKey(credentials, fieldValue, userMappings, spiraSoapService);
                                     if (customPropertyValueMapping != null)
                                     {
                                         InternalFunctions.SetCustomPropertyValue(remoteArtifact, customProperty.PropertyNumber, customPropertyValueMapping.InternalId);
@@ -1576,14 +1573,15 @@ namespace SampleDataSync
         /// Updates the external bug object with any incident custom property values
         /// </summary>
         /// <param name="projectId">The id of the current project</param>
-        /// <param name="spiraImportExport">The Spira API proxy class</param>
+        /// <param name="spiraSoapService">The Spira API proxy class</param>
         /// <param name="remoteArtifact">The Spira artifact</param>
         /// <param name="customPropertyMappingList">The mapping of custom properties</param>
         /// <param name="customPropertyValueMappingList">The mapping of custom property list values</param>
         /// <param name="externalSystemCustomFieldValues">The list of custom fields in the external system</param>
         /// <param name="productName">The name of the product being connected to (SpiraTest, SpiraPlan, etc.)</param>
         /// <param name="userMappings">The user mappings</param>
-        private void ProcessCustomProperties(string productName, int projectId, RemoteArtifact remoteArtifact, Dictionary<string, object> externalSystemCustomFieldValues, Dictionary<int, RemoteDataMapping> customPropertyMappingList, Dictionary<int, RemoteDataMapping[]> customPropertyValueMappingList, RemoteDataMapping[] userMappings, ImportExportClient spiraImportExport)
+        /// <param name="credentials">The Spira credentials</param>
+        private void ProcessCustomProperties(RemoteCredentials credentials, string productName, int projectId, RemoteArtifact remoteArtifact, Dictionary<string, object> externalSystemCustomFieldValues, Dictionary<int, RemoteDataMapping> customPropertyMappingList, Dictionary<int, RemoteDataMapping[]> customPropertyValueMappingList, RemoteDataMapping[] userMappings, SoapServiceClient spiraSoapService)
         {
             foreach (RemoteArtifactCustomProperty artifactCustomProperty in remoteArtifact.CustomProperties)
             {
@@ -1694,7 +1692,7 @@ namespace SampleDataSync
 
                                 LogTraceEvent(eventLog, "Got value for user custom property: " + customProperty.Name + " (" + artifactCustomProperty.IntegerValue.Value + ")\n", EventLogEntryType.Information);
                                 //Get the corresponding external system user (if there is one)
-                                RemoteDataMapping dataMapping = FindUserMappingByInternalId(artifactCustomProperty.IntegerValue.Value, userMappings, spiraImportExport);
+                                RemoteDataMapping dataMapping = FindUserMappingByInternalId(credentials, artifactCustomProperty.IntegerValue.Value, userMappings, spiraSoapService);
                                 if (dataMapping != null)
                                 {
                                     string externalUserName = dataMapping.ExternalKey;
@@ -1749,12 +1747,14 @@ namespace SampleDataSync
         /// <param name="internalId">The internal id</param>
         /// <param name="dataMappings">The list of mappings</param>
         /// <returns>The matching entry or Null if none found</returns>
+        /// <param name="credentials">The Spira credentials</param>
+        /// <param name="client">The Spira API client</param>
         /// <remarks>If we are auto-mapping users, it will lookup the user-id instead</remarks>
-        protected RemoteDataMapping FindUserMappingByInternalId(int internalId, RemoteDataMapping[] dataMappings, ImportExportClient client)
+        protected RemoteDataMapping FindUserMappingByInternalId(RemoteCredentials credentials, int internalId, RemoteDataMapping[] dataMappings, SoapServiceClient client)
         {
             if (this.autoMapUsers)
             {
-                RemoteUser remoteUser = client.User_RetrieveById(internalId);
+                RemoteUser remoteUser = client.User_RetrieveById(credentials, internalId);
                 if (remoteUser == null)
                 {
                     return null;
@@ -1777,13 +1777,15 @@ namespace SampleDataSync
         /// <param name="dataMappings">The list of mappings</param>
         /// <returns>The matching entry or Null if none found</returns>
         /// <remarks>If we are auto-mapping users, it will lookup the username instead</remarks>
-        protected RemoteDataMapping FindUserMappingByExternalKey(string externalKey, RemoteDataMapping[] dataMappings, ImportExportClient client)
+        /// <param name="credentials">The Spira credentials</param>
+        /// <param name="client">The Spira client</param>
+        protected RemoteDataMapping FindUserMappingByExternalKey(RemoteCredentials credentials, string externalKey, RemoteDataMapping[] dataMappings, SoapServiceClient client)
         {
             if (this.autoMapUsers)
             {
                 try
                 {
-                    RemoteUser remoteUser = client.User_RetrieveByUserName(externalKey);
+                    RemoteUser remoteUser = client.User_RetrieveByUserName(credentials, externalKey, true);
                     if (remoteUser == null)
                     {
                         return null;
